@@ -1,6 +1,5 @@
 #include <iostream>
 #include <atomic>
-#include <iomanip>
 #include <thread>
 #include <windows.h>
 #include <fstream>
@@ -14,7 +13,8 @@
 
 using namespace std;
 
-extern AsioDrivers* asioDrivers;
+
+//ASIO DRIVER DATA
 bool loadAsioDriver(char *name);
 
 enum {
@@ -58,16 +58,6 @@ typedef struct driverData
     ASIOChannelInfo channelInfos[kMaxInputChannels + kMaxOutputChannels]; // channel info's
     // The above two arrays share the same indexing, as the data in them are linked together
 
-    // Information from ASIOGetSamplePosition()
-    // data is converted to double floats for easier use, however 64 bit integer can be used, too
-    double         nanoSeconds;
-    double         samples;
-    double         tcSamples;	// time code samples
-
-    // bufferSwitchTimeInfo()
-    ASIOTime       tInfo;			// time info state
-    unsigned long  sysRefTime;      // system reference time, when bufferSwitch() was called
-
     // Signal the end of processing in this example
     atomic_bool    stop = false;
     atomic_bool    failOver = false;
@@ -88,6 +78,253 @@ typedef struct driverData
 
 DriverInfo driverData = {0};
 
+
+//DRIVER CALLBACKS
+//Main data process callback
+ASIOTime *bufferSwitchTimeInfo(ASIOTime *, long, ASIOBool);
+
+//Purely for backwards compatibility, just calls bufferSwitchTimeInfo
+void bufferSwitch(long, ASIOBool);
+
+//Placeholder for right now
+void sampleRateChanged(ASIOSampleRate);
+
+//Get messages from the driver to the application
+long asioMessages(long, long, void*, double*);
+
+
+
+//APPLICATION FUNCTIONS
+//Read command via midi input
+void readMidi();
+
+//Learn the new manual switch midi note
+void learnMidi();
+
+//Get cli input message from the user
+void getUserMessages();
+
+int main() {
+    do{
+        Sleep(20);
+        fstream programData("prog.dat", ios::in | ios::binary);
+        AsioDrivers currDrivers;
+
+        //INITIALIZE MIDI
+        while(!driverData.input.is_port_open()){
+            for(int i = 0; i < driverData.input.get_port_count(); i++){
+
+                //Find the specified midi port
+                if(driverData.input.get_port_name(i) == "NUCMidi 1"){
+                    driverData.input.open_port(i);
+                    cout << "MIDI Port FOUND: " << driverData.input.get_port_name(i) << endl;
+                    break;
+                }
+            }
+
+            //Keep looping till the correct midi port is found
+            if(!driverData.input.is_port_open()){
+                cout << "MIDI NETWORK NOT FOUND: Network name should be \"NUCMidi\"" << endl;
+                cout << "Retry in 3 Seconds" << endl;
+                Sleep(3000);
+                system("CLS");
+            }
+        }
+
+        //INITIALIZE THE DRIVER
+        char danteName[] = "Dante Virtual Soundcard (x64)";
+
+        //Loop while dante virtual soundcard is not found
+        do{
+            loadAsioDriver(danteName);
+
+            ASIOInit(&driverData.driverInfo);
+            cout << driverData.driverInfo.name << endl;
+            cout << ((!strcmp(driverData.driverInfo.errorMessage, "No ASIO Driver Error")) ? "No Errors" : driverData.driverInfo.errorMessage) << endl;
+
+            if(strcmp(danteName, driverData.driverInfo.name)){
+                Sleep(1000);
+            }
+        } while(strcmp(danteName, driverData.driverInfo.name));
+
+        //INITIALIZE MIDI SWITCH NOTE
+        vector<unsigned char> data = {0,0,0};
+        programData.read((char*)&data.at(0), 3);
+        programData.close();
+
+        driverData.message.bytes = data;
+
+
+        //GET NUMBER OF CHANNELS
+        ASIOGetChannels(&driverData.inputChannels, &driverData.outputChannels);
+
+        //Get DRIVER LATENCIES
+        ASIOGetLatencies(&driverData.inputLatency, &driverData.outputLatency);
+
+        //GET PREFERRED BUFFER SIZE
+        ASIOGetBufferSize(&driverData.minSize, &driverData.maxSize, &driverData.preferredSize, &driverData.granularity);
+
+        //GET SAMPLE RATE
+        ASIOGetSampleRate(&driverData.sampleRate);
+
+        //CHECK FOR OUTPUT READY
+        if(ASIOOutputReady() == ASE_OK){
+            driverData.postOutput = true;
+        } else{
+            driverData.postOutput = false;
+        }
+
+        //CREATE BUFFERS
+        ASIOBufferInfo* indx = driverData.bufferInfos;
+        ASIOChannelInfo *idx = driverData.channelInfos;
+        ASIOCallbacks callbacks;
+
+        //LOAD BUFFERS
+        for(int i = 0; i < driverData.inputChannels; i++, indx++, idx++){
+            idx->isInput = indx->isInput = ASIOTrue;
+            idx->channel = indx->channelNum = i;
+            indx->buffers[0] = indx->buffers[1] = nullptr;
+        }
+        for(int i = 0; i < driverData.outputChannels; i++, indx++, idx++){
+            idx->isInput = indx->isInput = ASIOFalse;
+            idx->channel = indx->channelNum = i;
+            indx->buffers[0] = indx->buffers[1] = nullptr;
+        }
+
+        //PASS CALLBACKS TO DRIVER
+        callbacks.bufferSwitch = &bufferSwitch;
+        callbacks.bufferSwitchTimeInfo = &bufferSwitchTimeInfo;
+        callbacks.asioMessage = &asioMessages;
+        callbacks.sampleRateDidChange = &sampleRateChanged;
+
+        //INITIALIZE BUFFERS IN THE DRIVER
+        ASIOCreateBuffers(driverData.bufferInfos, driverData.inputChannels +
+                                                      driverData.outputChannels, driverData.preferredSize, &callbacks);
+
+        int channelTotal = driverData.inputChannels + driverData.outputChannels;
+        for(int i = 0; i < channelTotal; i++) {
+            ASIOGetChannelInfo(&driverData.channelInfos[i]);
+        }
+
+        //START THE AUDIO STREAM AND MIDI THREADS
+        ASIOStart();
+        thread cliInputs(getUserMessages);
+        thread readMidiIn(readMidi);
+
+        while(!(driverData.stop || driverData.halt)){
+            Sleep(10);
+        }
+
+        //END STREAM TO DRIVER
+        ASIOStop();
+        ASIODisposeBuffers();
+        ASIOExit();
+
+        //WAIT FOR THREADS
+        readMidiIn.join();
+        cliInputs.join();
+
+        //CLOSE MIDI PORT
+        driverData.input.close_port();
+
+        driverData.halt = false;
+        system("CLS");
+    } while(!driverData.stop);
+    return 0;
+}
+
+void getUserMessages(){
+    char command;
+
+    cout << "WELCOME to Celebration Dante fail-over for Ableton: The program is already running" << endl;
+
+    while(!driverData.halt){
+        cout << "\nCurrent Computer: " << ((driverData.manualSwitch != driverData.failOver)? "SECONDARY" : "PRIMARY") << endl;
+        cout << "[M]idi Learn  [R]estart  [S]top" << endl << endl;
+
+        Sleep(20);
+
+        cin >> command;
+
+        switch (command) {
+            case('M'):
+                cout << "LEARNING MIDI, Timeout in 20 Seconds:" << endl;
+                driverData.midiLearn = true;
+                learnMidi();
+                driverData.midiLearn = false;
+                break;
+            case('R'):
+                cout << "RESTARTING: AUDIO WILL DROP FOR A SECOND" << endl;
+                driverData.halt = true;
+                break;
+            case('S'):
+                cout << "STOPPING PROGRAM: GOOD BYE" << endl;
+                Sleep(100);
+                driverData.stop = driverData.halt = true;
+                break;
+            default:
+                cout << "MESSAGE NOT UNDERSTOOD" << endl;
+                break;
+        }
+    }
+}
+
+void readMidi(){
+    libremidi::message message;
+
+    while(!driverData.halt){
+        while(!(driverData.midiLearn || driverData.halt)){
+            if(driverData.input.get_message(message)){
+                if(!strncmp((char*)&message.bytes[0], (char*)&driverData.message.bytes[0], 3)){
+                    if(driverData.failOver){
+                        driverData.failOver = false;
+                        cout << "REVERT TO PRIMARY" << endl;
+                        driverData.manualSwitch = false;
+                    } else{
+                        driverData.manualSwitch = !driverData.manualSwitch;
+                        cout << "MANUAL SWITCH" << endl;
+                        cout << "Current Computer: " << ((driverData.manualSwitch != driverData.failOver)? "SECONDARY" : "PRIMARY") << endl;
+                    }
+                }
+            }
+        }
+        Sleep(30);
+    }
+}
+
+void learnMidi(){
+    libremidi::message message;
+    fstream programData("prog.dat", ios::out | ios::binary);
+
+    auto startTime = time(nullptr);
+
+    while(driverData.midiLearn && time(nullptr) - startTime < 20){
+        Sleep(100);
+
+        if(driverData.input.get_message(message)){
+            memcpy((char*)&driverData.message.bytes.at(0), (char*)&message.bytes.at(0), driverData.message.bytes.size());
+            cout << "Learned Midi" << endl;
+            cout << "Message: " << (int)driverData.message.bytes.at(0) << " "
+                 << (int)driverData.message.bytes.at(1) << " "
+                 << (int)driverData.message.bytes.at(2) << endl;
+
+            Sleep(1500);
+
+            programData.write((char*)(&driverData.message.bytes.at(0)), (int)driverData.message.bytes.size());
+            driverData.midiLearn = false;
+        }
+    }
+    if(driverData.midiLearn){
+        cout << "TIME OUT" << endl;
+        Sleep(50);
+        system("CLS");
+        Sleep(50);
+    }
+    programData.close();
+}
+
+
+
 ASIOTime *bufferSwitchTimeInfo(ASIOTime *timeInfo, long index, ASIOBool processNow)
 {    // buffer size in samples
     long buffSize = driverData.preferredSize;
@@ -101,6 +338,7 @@ ASIOTime *bufferSwitchTimeInfo(ASIOTime *timeInfo, long index, ASIOBool processN
     primary = (!driverData.manualSwitch) ? 31 : 63;
     secondary = (!driverData.manualSwitch) ? 63 : 31;
 
+    //Check signal channel for a dead signal
     if(!driverData.failOver) {
         for (int k = 0; k < 64; k++) {
             if (((char *) driverData.bufferInfos[primary].buffers[currIdx])[k] != 0) {
@@ -111,6 +349,7 @@ ASIOTime *bufferSwitchTimeInfo(ASIOTime *timeInfo, long index, ASIOBool processN
             }
         }
 
+        //Switch to back up if computer failed
         if (!priCount && secCount) {
             driverData.failOver = true;
             cout << "FAILOVER" << endl;
@@ -119,6 +358,7 @@ ASIOTime *bufferSwitchTimeInfo(ASIOTime *timeInfo, long index, ASIOBool processN
 
     int startChan = (!driverData.failOver != !driverData.manualSwitch) ? 32 : 0;
 
+    //Copy either primary or secondary computer input stream to the output stream
     for(int i = 0; i < 31; i++){
         memcpy(driverData.bufferInfos[i + 64].buffers[index], driverData.bufferInfos[i + startChan].buffers[(index + 1) % 2], buffSize * 3);
     }
@@ -130,7 +370,6 @@ ASIOTime *bufferSwitchTimeInfo(ASIOTime *timeInfo, long index, ASIOBool processN
     return 0L;
 }
 
-//----------------------------------------------------------------------------------
 void bufferSwitch(long index, ASIOBool processNow)
 {	// the actual processing callback.
     // Beware that this is normally in a seperate thread, hence be sure that you take care
@@ -150,19 +389,11 @@ void bufferSwitch(long index, ASIOBool processNow)
     bufferSwitchTimeInfo (&timeInfo, index, processNow);
 }
 
-
-//----------------------------------------------------------------------------------
 void sampleRateChanged(ASIOSampleRate sRate)
 {
-    // do whatever you need to do if the sample rate changed
-    // usually this only happens during external sync.
-    // Audio processing is not stopped by the driver, actual sample rate
-    // might not have even changed, maybe only the sample rate status of an
-    // AES/EBU or S/PDIF digital input at the audio device.
-    // You might have to update time/sample related conversion routines, etc.
+    //Placeholder for right now
 }
 
-//----------------------------------------------------------------------------------
 long asioMessages(long selector, long value, void* message, double* opt)
 {
     // currently the parameters "value", "message" and "opt" are not used.
@@ -224,215 +455,4 @@ long asioMessages(long selector, long value, void* message, double* opt)
             break;
     }
     return ret;
-}
-
-void readMidi(){
-    libremidi::message message;
-
-    while(!driverData.halt){
-        while(!(driverData.midiLearn || driverData.halt)){
-            if(driverData.input.get_message(message)){
-                if(!strncmp((char*)&message.bytes[0], (char*)&driverData.message.bytes[0], 3)){
-                    if(driverData.failOver){
-                        driverData.failOver = false;
-                        cout << "REVERT TO PRIMARY" << endl;
-                        driverData.manualSwitch = false;
-                    } else{
-                        driverData.manualSwitch = !driverData.manualSwitch;
-                        cout << "MANUAL SWITCH" << endl;
-                        cout << "Current Computer: " << ((driverData.manualSwitch != driverData.failOver)? "SECONDARY" : "PRIMARY") << endl;
-                    }
-                }
-            }
-        }
-        Sleep(30);
-    }
-}
-
-void learnMidi(){
-    libremidi::message message;
-    fstream programData("prog.dat", ios::out | ios::binary);
-
-    auto startTime = time(nullptr);
-
-    while(driverData.midiLearn && time(nullptr) - startTime < 20){
-        Sleep(100);
-
-        if(driverData.input.get_message(message)){
-            memcpy((char*)&driverData.message.bytes.at(0), (char*)&message.bytes.at(0), driverData.message.bytes.size());
-            cout << "Learned Midi" << endl;
-            cout << "Message: " << (int)driverData.message.bytes.at(0) << " "
-                 << (int)driverData.message.bytes.at(1) << " "
-                 << (int)driverData.message.bytes.at(2) << endl;
-
-            Sleep(1500);
-
-            programData.write((char*)(&driverData.message.bytes.at(0)), (int)driverData.message.bytes.size());
-            driverData.midiLearn = false;
-        }
-    }
-    if(driverData.midiLearn){
-        cout << "TIME OUT" << endl;
-        Sleep(50);
-        system("CLS");
-        Sleep(50);
-    }
-    programData.close();
-}
-
-void getUserMessages(){
-    char command;
-
-    cout << "WELCOME to Celebration Dante fail-over for Ableton: The program is already running" << endl;
-
-    while(!driverData.halt){
-        cout << "\nCurrent Computer: " << ((driverData.manualSwitch != driverData.failOver)? "SECONDARY" : "PRIMARY") << endl;
-        cout << "[M]idi Learn  [R]estart  [S]top" << endl << endl;
-
-        Sleep(20);
-
-        cin >> command;
-
-        switch (command) {
-            case('M'):
-                cout << "LEARNING MIDI, Timeout in 20 Seconds:" << endl;
-                driverData.midiLearn = true;
-                learnMidi();
-                driverData.midiLearn = false;
-                break;
-            case('R'):
-                cout << "RESTARTING: AUDIO WILL DROP FOR A SECOND" << endl;
-                driverData.halt = true;
-                break;
-            case('S'):
-                cout << "STOPPING PROGRAM: GOOD BYE" << endl;
-                Sleep(100);
-                driverData.stop = driverData.halt = true;
-                break;
-            default:
-                cout << "MESSAGE NOT UNDERSTOOD" << endl;
-                break;
-        }
-    }
-}
-
-int main() {
-    do{
-        Sleep(20);
-        fstream programData("prog.dat", ios::in | ios::binary);
-        AsioDrivers currDrivers;
-
-        //INITIALIZE MIDI
-        while(!driverData.input.is_port_open()){
-            for(int i = 0; i < driverData.input.get_port_count(); i++){
-                if(driverData.input.get_port_name(i) == "NUCMidi 1"){
-                    driverData.input.open_port(i);
-                    cout << "MIDI Port FOUND: " << driverData.input.get_port_name(i) << endl;
-                    break;
-                }
-            }
-            if(!driverData.input.is_port_open()){
-                cout << "MIDI NETWORK NOT FOUND: Network name should be \"NUCMidi\"" << endl;
-                cout << "Retry in 3 Seconds" << endl;
-                Sleep(3000);
-                system("CLS");
-            }
-        }
-
-        //INITIALIZE THE DRIVER
-        char danteName[] = "Dante Virtual Soundcard (x64)";
-
-        do{
-            loadAsioDriver(danteName);
-
-            ASIOInit(&driverData.driverInfo);
-            cout << driverData.driverInfo.name << endl;
-            cout << ((!strcmp(driverData.driverInfo.errorMessage, "No ASIO Driver Error")) ? "No Errors" : driverData.driverInfo.errorMessage) << endl;
-
-            if(strcmp(danteName, driverData.driverInfo.name)){
-                Sleep(1000);
-            }
-        } while(strcmp(danteName, driverData.driverInfo.name));
-
-        //INITIALIZE MIDI SWITCH NOTE
-        vector<unsigned char> data(3);
-        programData.read((char*)&data.at(0), 3);
-        programData.close();
-
-        driverData.message.bytes = data;
-
-
-        //GET NUMBER OF CHANNELS
-        ASIOGetChannels(&driverData.inputChannels, &driverData.outputChannels);
-
-
-        //GET PREFERRED BUFFER SIZE
-        ASIOGetBufferSize(&driverData.minSize, &driverData.maxSize, &driverData.preferredSize, &driverData.granularity);
-
-        //GET SAMPLE RATE
-        ASIOGetSampleRate(&driverData.sampleRate);
-
-        //SET SAMPLE RATE
-        ASIOSetSampleRate(driverData.sampleRate);
-
-
-        //CHECK FOR OUTPUT READY
-        if(ASIOOutputReady() == ASE_OK){
-            driverData.postOutput = true;
-        } else{
-            driverData.postOutput = false;
-        }
-
-
-        //CREATE BUFFERS
-        ASIOBufferInfo* indx = driverData.bufferInfos;
-        ASIOChannelInfo *idx = driverData.channelInfos;
-        ASIOCallbacks callbacks;
-
-        for(int i = 0; i < driverData.inputChannels; i++, indx++, idx++){
-            idx->isInput = indx->isInput = ASIOTrue;
-            idx->channel = indx->channelNum = i;
-            indx->buffers[0] = indx->buffers[1] = nullptr;
-        }
-        for(int i = 0; i < driverData.outputChannels; i++, indx++, idx++){
-            idx->isInput = indx->isInput = ASIOFalse;
-            idx->channel = indx->channelNum = i;
-            indx->buffers[0] = indx->buffers[1] = nullptr;
-        }
-
-        callbacks.bufferSwitch = &bufferSwitch;
-        callbacks.bufferSwitchTimeInfo = &bufferSwitchTimeInfo;
-        callbacks.asioMessage = &asioMessages;
-        callbacks.sampleRateDidChange = &sampleRateChanged;
-
-        ASIOCreateBuffers(driverData.bufferInfos, driverData.inputChannels +
-                                                      driverData.outputChannels, driverData.preferredSize, &callbacks);
-
-        int channelTotal = driverData.inputChannels + driverData.outputChannels;
-        for(int i = 0; i < channelTotal; i++){
-            ASIOGetChannelInfo(&driverData.channelInfos[i]);
-        }
-
-        driverData.failOver = false;
-
-        ASIOStart();
-        thread midiRead(getUserMessages);
-        thread readMidiIn(readMidi);
-
-        while(!(driverData.stop || driverData.halt)){
-            Sleep(10);
-        }
-        ASIOStop();
-        ASIODisposeBuffers();
-        ASIOExit();
-
-        readMidiIn.join();
-        midiRead.join();
-
-        driverData.input.close_port();
-
-        driverData.halt = false;
-        system("CLS");
-    } while(!driverData.stop);
-    return 0;
 }
