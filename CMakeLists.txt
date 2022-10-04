@@ -10,7 +10,7 @@ include_directories(CelebrationASIO
 
 link_directories(${PROJECT_SOURCE_DIR}/lib)
 
-add_executable(CelebrationASIO main.cpp ${SOURCES})
+add_executable(CelebrationASIO driver.cpp ${SOURCES})
 
 
 target_link_libraries(CelebrationASIO ASIO libremidi winmm pthread)
