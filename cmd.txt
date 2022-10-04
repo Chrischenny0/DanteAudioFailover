@@ -1,0 +1,1 @@
+g++ -I./include -L./lib main.cpp -lASIO -llibremidi -lOle32 -lwinmm
