@@ -227,7 +227,8 @@ int main() {
         //CLOSE MIDI PORT
         driverData.input.close_port();
 
-        driverData.halt = false;
+        //RESET FLAGS
+        driverData.halt = driverData.manualSwitch = driverData.failOver = false;
         system("CLS");
     } while(!driverData.stop);
     return 0;
@@ -278,10 +279,13 @@ void readMidi(){
                 if(!strncmp((char*)&message.bytes[0], (char*)&driverData.message.bytes[0], 3)){
                     if(driverData.failOver){
                         driverData.failOver = false;
-                        cout << "REVERT TO PRIMARY" << endl;
-                        driverData.manualSwitch = false;
+                        system("CLS");
+                        Sleep(2);
+                        cout << ((driverData.manualSwitch)? "REVERTED TO SECONDARY":"REVERTED TO PRIMARY") << endl;
                     } else{
                         driverData.manualSwitch = !driverData.manualSwitch;
+                        system("CLS");
+                        Sleep(2);
                         cout << "MANUAL SWITCH" << endl;
                         cout << "Current Computer: " << ((driverData.manualSwitch != driverData.failOver)? "SECONDARY" : "PRIMARY") << endl;
                     }
