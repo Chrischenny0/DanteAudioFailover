@@ -5,8 +5,7 @@
 #include <fstream>
 #include <cstring>
 #include <ctime>
-#include "libremidi/libremidi.hpp"
-#include "libremidi/api.hpp"
+#include <libremidi/libremidi.hpp>
 #include "asiosys.h"
 #include "asio.h"
 #include "asiodrivers.h"
@@ -70,6 +69,7 @@ typedef struct driverData
 
     //Midi Driver
     libremidi::midi_in input;
+    libremidi::midi_out midiOut;
 
     //Current Midi Note Switch
     libremidi::message message;
@@ -77,7 +77,6 @@ typedef struct driverData
 } DriverInfo;
 
 DriverInfo driverData = {0};
-
 
 //DRIVER CALLBACKS
 //Main data process callback
@@ -91,7 +90,6 @@ void sampleRateChanged(ASIOSampleRate);
 
 //Get messages from the driver to the application
 long asioMessages(long, long, void*, double*);
-
 
 
 //APPLICATION FUNCTIONS
@@ -111,20 +109,38 @@ int main() {
         AsioDrivers currDrivers;
 
         //INITIALIZE MIDI
-        while(!driverData.input.is_port_open()){
+        while(!driverData.input.is_port_open() || !driverData.midiOut.is_port_open()){
             for(int i = 0; i < driverData.input.get_port_count(); i++){
 
                 //Find the specified midi port
                 if(driverData.input.get_port_name(i) == "NUCMidi 1"){
                     driverData.input.open_port(i);
-                    cout << "MIDI Port FOUND: " << driverData.input.get_port_name(i) << endl;
+                    cout << "MIDI Input Port FOUND: " << driverData.input.get_port_name(i) << endl;
                     break;
                 }
             }
+            Sleep(150);
+
+            for(int i = 0; i < driverData.midiOut.get_port_count(); i++){
+                //Find the specified midi port
+                if(driverData.midiOut.get_port_name(i) == "NUCMidi 1"){
+                    driverData.midiOut.open_port(i);
+                    cout << "MIDI Output Port FOUND: " << driverData.midiOut.get_port_name(i) << endl;
+                    break;
+                }
+            }
+            Sleep(150);
 
             //Keep looping till the correct midi port is found
             if(!driverData.input.is_port_open()){
-                cout << "MIDI NETWORK NOT FOUND: Network name should be \"NUCMidi\"" << endl;
+                cout << "MIDI INPUT NETWORK NOT FOUND: Network name should be \"NUCMidiIn\"" << endl;
+                cout << "Retry in 3 Seconds" << endl;
+                Sleep(3000);
+                system("CLS");
+            }
+            //Keep looping till the correct midi port is found
+            if(!driverData.midiOut.is_port_open()){
+                cout << "MIDI OUTPUT NETWORK NOT FOUND: Network name should be \"NUCdriverData.midiOut\"" << endl;
                 cout << "Retry in 3 Seconds" << endl;
                 Sleep(3000);
                 system("CLS");
@@ -211,7 +227,29 @@ int main() {
         thread cliInputs(getUserMessages);
         thread readMidiIn(readMidi);
 
+        bool currComp = false;
+        vector<unsigned char> buttonOn;
+        buttonOn.push_back(144);
+        buttonOn.push_back(93);
+        buttonOn.push_back(127);
+
+        vector<unsigned char> buttonOff;
+        buttonOff.push_back(128);
+        buttonOff.push_back(105);
+        buttonOff.push_back(0);
+
+        driverData.midiOut.send_message(buttonOn);
+
         while(!(driverData.stop || driverData.halt)){
+            if(currComp != (driverData.failOver != driverData.manualSwitch)){
+                if(!currComp){
+                    driverData.midiOut.send_message(buttonOff);
+                } else{
+                    driverData.midiOut.send_message(buttonOn);
+                }
+                cout << "Switch LED" << endl;
+                currComp = !currComp;
+            }
             Sleep(10);
         }
 
@@ -226,6 +264,7 @@ int main() {
 
         //CLOSE MIDI PORT
         driverData.input.close_port();
+        driverData.midiOut.close_port();
 
         //RESET FLAGS
         driverData.halt = driverData.manualSwitch = driverData.failOver = false;
