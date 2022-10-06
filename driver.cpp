@@ -57,6 +57,8 @@ typedef struct driverData
     ASIOChannelInfo channelInfos[kMaxInputChannels + kMaxOutputChannels]; // channel info's
     // The above two arrays share the same indexing, as the data in them are linked together
 
+    int numFailedFrames = 0;
+
     // Signal the end of processing in this example
     atomic_bool    stop = false;
     atomic_bool    failOver = false;
@@ -228,7 +230,7 @@ int main() {
         thread readMidiIn(readMidi);
 
         bool currComp = false;
-        vector<unsigned char> buttonOn = {144, 93, 127};
+        vector<unsigned char> buttonOn = {144, 105, 127};
         vector<unsigned char> buttonOff = {128, 105, 0};
 
         driverData.midiOut.send_message(buttonOn);
@@ -387,8 +389,12 @@ ASIOTime *bufferSwitchTimeInfo(ASIOTime *timeInfo, long index, ASIOBool processN
 
         //Switch to back up if computer failed
         if (!priCount && secCount) {
-            driverData.failOver = true;
-            cout << "FAILOVER" << endl;
+            driverData.numFailedFrames++;
+            if(driverData.numFailedFrames > 5){
+                driverData.failOver = true;
+                cout << "FAILOVER" << endl;
+                driverData.numFailedFrames = 0;
+            }
         }
     }
 
