@@ -228,15 +228,8 @@ int main() {
         thread readMidiIn(readMidi);
 
         bool currComp = false;
-        vector<unsigned char> buttonOn;
-        buttonOn.push_back(144);
-        buttonOn.push_back(93);
-        buttonOn.push_back(127);
-
-        vector<unsigned char> buttonOff;
-        buttonOff.push_back(128);
-        buttonOff.push_back(105);
-        buttonOff.push_back(0);
+        vector<unsigned char> buttonOn = {144, 93, 127};
+        vector<unsigned char> buttonOff = {128, 105, 0};
 
         driverData.midiOut.send_message(buttonOn);
 
