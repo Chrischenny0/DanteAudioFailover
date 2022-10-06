@@ -395,6 +395,8 @@ ASIOTime *bufferSwitchTimeInfo(ASIOTime *timeInfo, long index, ASIOBool processN
                 cout << "FAILOVER" << endl;
                 driverData.numFailedFrames = 0;
             }
+        } else{
+            driverData.numFailedFrames = 0;
         }
     }
 
